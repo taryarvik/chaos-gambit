@@ -1,0 +1,423 @@
+import React, { useState, useEffect, useMemo } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+
+/* ===================== CORE DICE ===================== */
+function rollD6() {
+  return Math.floor(Math.random() * 6) + 1;
+}
+
+function chaosRoll() {
+  let rolls = [];
+  let multiplier = 0;
+  let roll = rollD6();
+  rolls.push(roll);
+
+  if (roll === 1) return { multiplier: 0, rolls, jackpot: false, sixSeries: 0 };
+  if (roll === 2) multiplier = 0.5;
+  if (roll === 3) multiplier = 1;
+  if (roll === 4) multiplier = 1.5;
+  if (roll === 5) multiplier = 2;
+
+  let jackpot = false;
+  let sixSeries = 0;
+
+  if (roll === 6) {
+    multiplier = 3;
+    jackpot = true;
+    sixSeries = 1;
+    while (true) {
+      let next = rollD6();
+      rolls.push(next);
+      if (next === 6) {
+        multiplier += 1;
+        sixSeries += 1;
+      } else break;
+    }
+  }
+
+  return { multiplier, rolls, jackpot, sixSeries };
+}
+
+/* ===================== CHARACTER TEMPLATE ===================== */
+const emptyCharacter = () => ({
+  name: "Hero",
+  weapon: "Basic Sword",
+  baseDMG: 100,
+  level: 1,
+  modifiers: [],
+  log: [],
+  lastDamage: 0,
+  stats: {
+    totalAttacks: 0,
+    totalDamage: 0,
+    maxDamage: 0,
+    sixCount: 0,
+    maxSixSeries: 0
+  }
+});
+
+/* ===================== MAIN COMPONENT ===================== */
+export default function ChaosEngine() {
+  const [characters, setCharacters] = useState([
+    emptyCharacter(),
+    emptyCharacter(),
+    emptyCharacter()
+  ]);
+
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [jackpotFlash, setJackpotFlash] = useState(false);
+  const [cubeRotation, setCubeRotation] = useState({ x: 0, y: 0 });
+  const [rolling, setRolling] = useState(false);
+
+  const active = characters[activeIndex];
+
+  /* ===================== SAVE SYSTEM ===================== */
+  useEffect(() => {
+    const saved = localStorage.getItem("chaos_engine_full_v1");
+    if (saved) setCharacters(JSON.parse(saved));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("chaos_engine_full_v1", JSON.stringify(characters));
+  }, [characters]);
+
+  /* ===================== CHARACTER UPDATE ===================== */
+  function updateCharacter(field, value) {
+    const updated = [...characters];
+    updated[activeIndex][field] = value;
+    setCharacters(updated);
+  }
+
+  /* ===================== MODIFIERS SYSTEM ===================== */
+  function updateModifiers(mods) {
+    const updated = [...characters];
+    updated[activeIndex].modifiers = mods;
+    setCharacters(updated);
+  }
+
+  function addModifier(category) {
+    const newMod = {
+      id: crypto.randomUUID(),
+      name: "Effect",
+      category,
+      type: "flat",
+      target: "base",
+      value: 10,
+      enabled: true
+    };
+    updateModifiers([...active.modifiers, newMod]);
+  }
+
+  function updateModifier(id, field, value) {
+    updateModifiers(
+      active.modifiers.map(m =>
+        m.id === id ? { ...m, [field]: value } : m
+      )
+    );
+  }
+
+  function removeModifier(id) {
+    updateModifiers(active.modifiers.filter(m => m.id !== id));
+  }
+
+  /* ===================== RESET ===================== */
+  function clearLog() {
+    const updated = [...characters];
+    updated[activeIndex].log = [];
+    setCharacters(updated);
+  }
+
+  function resetStats() {
+    const updated = [...characters];
+    updated[activeIndex].stats = emptyCharacter().stats;
+    updated[activeIndex].lastDamage = 0;
+    setCharacters(updated);
+  }
+
+  /* ===================== DAMAGE CALC ===================== */
+  function calculateDamage() {
+    const mods = active.modifiers.filter(m => m.enabled);
+
+    let flat = 0;
+    let percent = 0;
+    let logLines = [];
+
+    mods.forEach(mod => {
+      if (mod.target === "base") {
+        if (mod.type === "flat") {
+          flat += Number(mod.value);
+          logLines.push(`+${mod.value} flat from ${mod.name}`);
+        }
+        if (mod.type === "percent") {
+          percent += Number(mod.value);
+          logLines.push(`+${mod.value}% from ${mod.name}`);
+        }
+      }
+    });
+
+    let baseStageRaw = active.baseDMG + flat;
+    let baseStage = baseStageRaw * (1 + percent / 100);
+    logLines.push(`Base stage = ${baseStage.toFixed(2)}`);
+
+    let trueStage = baseStage * (1 + 0.05 * active.level);
+    logLines.push(`Level scaling x${(1 + 0.05 * active.level).toFixed(2)} = ${trueStage.toFixed(2)}`);
+
+    const chaos = chaosRoll();
+    let finalStage = trueStage * chaos.multiplier;
+    logLines.push(`Chaos x${chaos.multiplier} = ${finalStage.toFixed(2)}`);
+
+    mods.forEach(mod => {
+      if (mod.target === "final") {
+        if (mod.type === "multiplier") {
+          finalStage *= Number(mod.value);
+          logLines.push(`${mod.name} x${mod.value}`);
+        }
+        if (mod.type === "divider") {
+          finalStage /= Number(mod.value);
+          logLines.push(`${mod.name} ÷${mod.value}`);
+        }
+      }
+    });
+
+    const dmg = Math.floor(finalStage);
+
+    return {
+      dmg,
+      rolls: chaos.rolls,
+      jackpot: chaos.jackpot,
+      sixSeries: chaos.sixSeries,
+      breakdown: logLines
+    };
+  }
+
+  /* ===================== APPLY RESULT ===================== */
+  function applyResult(result) {
+    const updated = [...characters];
+    const char = updated[activeIndex];
+
+    char.lastDamage = result.dmg;
+
+    char.log.unshift({ id: Date.now(), ...result });
+    char.log = char.log.slice(0, 200);
+
+    char.stats.totalAttacks += 1;
+    char.stats.totalDamage += result.dmg;
+    if (result.dmg > char.stats.maxDamage)
+      char.stats.maxDamage = result.dmg;
+    if (result.sixSeries > 0)
+      char.stats.sixCount += 1;
+    if (result.sixSeries > char.stats.maxSixSeries)
+      char.stats.maxSixSeries = result.sixSeries;
+
+    setCharacters(updated);
+  }
+
+  /* ===================== ATTACK ===================== */
+  function getRotationForFace(face) {
+    switch (face) {
+      case 1: return { x: 0, y: 0 };
+      case 2: return { x: -90, y: 0 };
+      case 3: return { x: 0, y: 90 };
+      case 4: return { x: 0, y: -90 };
+      case 5: return { x: 90, y: 0 };
+      case 6: return { x: 180, y: 0 };
+      default: return { x: 0, y: 0 };
+    }
+  }
+
+  function attack() {
+    if (rolling) return;
+    setRolling(true);
+
+    const result = calculateDamage();
+    const finalFace = result.rolls[result.rolls.length - 1];
+    const target = getRotationForFace(finalFace);
+
+    const extraSpins = 720;
+
+    setCubeRotation(prev => ({
+      x: prev.x + extraSpins + target.x,
+      y: prev.y + extraSpins + target.y
+    }));
+
+    setTimeout(() => {
+      if (result.jackpot) {
+        setJackpotFlash(true);
+        setTimeout(() => setJackpotFlash(false), 400);
+      }
+      applyResult(result);
+      setRolling(false);
+    }, 900);
+  }
+
+  function simulate1000() {
+    for (let i = 0; i < 1000; i++) {
+      const result = calculateDamage();
+      applyResult(result);
+    }
+  }
+
+  /* ===================== STATS ===================== */
+  const averageDamage = useMemo(() => {
+    if (active.stats.totalAttacks === 0) return 0;
+    return Math.floor(active.stats.totalDamage / active.stats.totalAttacks);
+  }, [active.stats]);
+
+  const sixPercent = useMemo(() => {
+    if (active.stats.totalAttacks === 0) return 0;
+    return ((active.stats.sixCount / active.stats.totalAttacks) * 100).toFixed(1);
+  }, [active.stats]);
+
+  /* ===================== UI ===================== */
+  return (
+    <div className="min-h-screen bg-black text-white p-6 font-mono relative overflow-hidden">
+
+      <AnimatePresence>
+        {jackpotFlash && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 0.8 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 bg-yellow-400 mix-blend-overlay pointer-events-none"
+          />
+        )}
+      </AnimatePresence>
+
+      <h1 className="text-3xl text-center text-red-500 mb-6 drop-shadow-[0_0_20px_red]">
+        CHAOS ENGINE ULTIMATE
+      </h1>
+
+      <div className="flex gap-4 mb-4 justify-center">
+        {characters.map((c, i) => (
+          <button
+            key={i}
+            onClick={() => setActiveIndex(i)}
+            className={`px-4 py-2 rounded ${i === activeIndex ? "bg-red-700" : "bg-zinc-800"}`}
+          >
+            Slot {i + 1}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex justify-center gap-4 mb-6">
+        <button onClick={simulate1000} className="bg-purple-700 px-4 py-2 rounded">Simulate 1000</button>
+      </div>
+
+      <div className="grid lg:grid-cols-3 gap-6">
+
+        {/* LEFT PANEL */}
+        <div className="bg-zinc-900 p-6 rounded-2xl">
+
+          <div className="mb-6 text-center">
+            <div className="text-sm text-zinc-400">FINAL DAMAGE</div>
+            <motion.div
+              key={active.lastDamage}
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1.2, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 200 }}
+              className="text-5xl font-bold text-red-500 drop-shadow-[0_0_20px_red]"
+            >
+              {active.lastDamage}
+            </motion.div>
+          </div>
+
+          <input value={active.name} onChange={e => updateCharacter("name", e.target.value)} className="w-full mb-2 bg-black p-2 rounded" />
+          <input value={active.weapon} onChange={e => updateCharacter("weapon", e.target.value)} className="w-full mb-2 bg-black p-2 rounded" />
+          <input type="number" value={active.baseDMG} onChange={e => updateCharacter("baseDMG", Number(e.target.value))} className="w-full mb-2 bg-black p-2 rounded" />
+          <input type="number" value={active.level} onChange={e => updateCharacter("level", Number(e.target.value))} className="w-full mb-4 bg-black p-2 rounded" />
+
+          <div className="flex justify-center mb-6" style={{ perspective: 1000 }}>
+            <motion.div
+              animate={{ rotateX: cubeRotation.x, rotateY: cubeRotation.y }}
+              transition={{ duration: 0.9, ease: [0.2, 0.8, 0.2, 1] }}
+              className="w-24 h-24 relative"
+              style={{ transformStyle: "preserve-3d" }}
+            >
+              {[1,2,3,4,5,6].map(n => (
+                <div
+                  key={n}
+                  className="absolute w-24 h-24 bg-red-700 flex items-center justify-center text-3xl font-bold border border-black"
+                  style={{
+                    transform:
+                      n === 1 ? "rotateY(0deg) translateZ(48px)" :
+                      n === 2 ? "rotateX(90deg) translateZ(48px)" :
+                      n === 3 ? "rotateY(-90deg) translateZ(48px)" :
+                      n === 4 ? "rotateY(90deg) translateZ(48px)" :
+                      n === 5 ? "rotateX(-90deg) translateZ(48px)" :
+                      "rotateX(180deg) translateZ(48px)"
+                  }}
+                >
+                  {n}
+                </div>
+              ))}
+            </motion.div>
+          </div>
+
+          <button onClick={attack} className="w-full p-4 bg-red-700 rounded-xl font-bold">ROLL CHAOS</button>
+        </div>
+
+        {/* MODIFIERS PANEL */}
+        <div className="bg-zinc-900 p-6 rounded-2xl overflow-y-auto max-h-[700px]">
+          <h2 className="text-lg text-cyan-400 mb-4">Effects</h2>
+          {['artifact','buff','debuff'].map(cat => (
+            <div key={cat} className="mb-6">
+              <div className="flex justify-between mb-2">
+                <h3 className="capitalize">{cat}</h3>
+                <button onClick={() => addModifier(cat)} className="bg-cyan-700 px-2 rounded">+ Add</button>
+              </div>
+              {active.modifiers.filter(m => m.category === cat).map(mod => (
+                <div key={mod.id} className="bg-black p-3 rounded mb-3 border border-zinc-700">
+                  <input value={mod.name} onChange={e => updateModifier(mod.id,'name',e.target.value)} className="w-full mb-2 bg-zinc-800 p-1 rounded" />
+                  <div className="grid grid-cols-3 gap-2 mb-2">
+                    <select value={mod.type} onChange={e => updateModifier(mod.id,'type',e.target.value)} className="bg-zinc-800 p-1 rounded">
+                      <option value="flat">flat</option>
+                      <option value="percent">percent</option>
+                      <option value="multiplier">multiplier</option>
+                      <option value="divider">divider</option>
+                    </select>
+                    <select value={mod.target} onChange={e => updateModifier(mod.id,'target',e.target.value)} className="bg-zinc-800 p-1 rounded">
+                      <option value="base">base</option>
+                      <option value="final">final</option>
+                    </select>
+                    <input type="number" value={mod.value} onChange={e => updateModifier(mod.id,'value',e.target.value)} className="bg-zinc-800 p-1 rounded" />
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <label>
+                      <input type="checkbox" checked={mod.enabled} onChange={e => updateModifier(mod.id,'enabled',e.target.checked)} /> Active
+                    </label>
+                    <button onClick={() => removeModifier(mod.id)} className="text-red-500 text-xs">Remove</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {/* LOG PANEL */}
+        <div className="bg-zinc-900 p-6 rounded-2xl overflow-y-auto max-h-[700px]">
+          <h2 className="text-lg text-purple-400 mb-4">Combat Log</h2>
+          <div className="mb-4 text-sm text-green-400">
+            Avg DMG: {averageDamage} <br />
+            Max DMG: {active.stats.maxDamage} <br />
+            Six Proc %: {sixPercent}% <br />
+            Max 6 Series: {active.stats.maxSixSeries}
+          </div>
+          <div className="flex gap-2 mb-4">
+            <button onClick={clearLog} className="bg-zinc-700 px-3 py-1 rounded text-xs">Clear Log</button>
+            <button onClick={resetStats} className="bg-red-800 px-3 py-1 rounded text-xs">Reset Stats</button>
+          </div>
+          {active.log.map(entry => (
+            <div key={entry.id} className="border-b border-zinc-700 py-2 text-xs">
+              🎲 {entry.rolls.join(' → ')} | 💥 {entry.dmg} DMG
+              <div className="text-cyan-400">
+                {entry.breakdown.map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
